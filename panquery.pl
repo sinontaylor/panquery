@@ -9,17 +9,15 @@ my $version = "1.0";
 
 #use strict;
 #use warnings;
-use Data::Dumper;
 use File::Basename;
 use FileHandle;
 use Getopt::Long;
 use Tie::IxHash; # for ordered hash for rules section as no rule uid exists in Palo Alto
-use Data::Validate::IP qw(is_ipv4);
+use Data::Validate::IP qw(is_ipv4 is_ipv6);
 use Net::IP::Match::Regexp qw(create_iprange_regexp_depthfirst match_ip);
-use Net::Netmask;
-use NetAddr::IP;
-use Net::IPv4Addr qw (:all);
-use Data::Validate::IP qw(is_ipv4);
+#use Net::Netmask;
+#use NetAddr::IP;
+#use Net::IPv4Addr qw (:all);
 use Text::CSV_XS;
 
 my $database;
@@ -33,12 +31,12 @@ my $ip;
 my $ipvf;
 my $match;
 my $me = basename($0, ".pl");
+my $nats;
 my $obj;
 my $objFile;
 my $policy;
 my $regex;
 my $rule;
-my $shared;
 my $unused;
 my $used;
 my $baseDir = "/root/Documents";
@@ -163,18 +161,18 @@ GetOptions(
         "db=s" => \$database,
         "debug" => \$debug,
         "depth:s" => \$depth,
-        "dump:s" => \$dump,
+        "dump" => \$dump,
         "duplicates" => \$duplicates,
         "grp:s" => \$grp,
         "ip:s" => \$ip,
         "ipvf" => \$ipvf,
         "list:s" => \@lists,
         "match" => \$match,
+        "nats" => \$nats,
         "obj:s" => \$obj,
         "policy" => \$policy,
         "regex" => \$regex,
         "rule:s" => \$rule,
-        "shared" => \$shared,
         "unused" => \$unused,
         "used" => \$used,
         "help" => \$help
@@ -182,7 +180,7 @@ GetOptions(
 
 usage($version) and exit if ($help);
 usage($version) and print "ERROR01 : db must not be empty\n" and exit if (!$database);
-usage($version) and print "ERROR02 : one of list, obj, grp, ip, rule, unused, used or dump required\n" and exit if ((!@lists) and (!$obj) and (!$grp) and (!$ip) and (!$rule) and (!$unused) and (!$used) and (!$dump));
+usage($version) and print "ERROR02 : one of list, obj, grp, ip, rule, unused, used, dump or debug required\n" and exit if ((!@lists) and (!$obj) and (!$grp) and (!$ip) and (!$rule) and (!$unused) and (!$used) and (!$dump) and (!$debug));
 
 ########################################################################################
 #
@@ -198,6 +196,7 @@ usage($version) and print "ERROR02 : one of list, obj, grp, ip, rule, unused, us
 
 # read provided file
 read_panmanager_format(\%applications, \%application_groups, \%application_filters, \%address_groups, \%addresses, \%services, \%service_groups, \%tags, \%zones, \%routes, \%dips, \%rules, \%nats, $database, $inputDir);
+calculate_address_group_regex(\%address_groups, \%addresses, \%Gaddresses, \%Gaddress_groups);
 
 readAppIDs(\%appids, \%predefined_applications, $appidfile, $staticDir);
 
@@ -742,7 +741,7 @@ if ($ip){
                 my @matchedObjects;
                 findObjectFromIP(\%addresses, \@matchedObjects, $ip);
                 foreach my $objName (@matchedObjects){
-                        print "$ip,$objName\n";
+                        print "$objName,$ip\n";
                         printGroups(\%address_groups, $objName, $match);
                 }
 		if ($match){
@@ -750,6 +749,13 @@ if ($ip){
 				if (exists ($addresses{$address}{'netre'})){
                         		if (match_ip($ip, $addresses{$address}{'netre'})){
 						print "$address,$addresses{$address}{'cidr'}\n";
+					}
+				}
+			}
+			foreach my $address_group (sort keys %address_groups){
+				if (exists ($address_groups{$address_group}{'netre'})){
+                        		if (match_ip($ip, $address_groups{$address_group}{'netre'})){
+						print "$address_group\n";
 					}
 				}
 			}
@@ -785,8 +791,15 @@ if (($dump) and ($policy)){
         foreach my $rule (keys %rules) {
                 push (@parentRules, $rule);
         }
-        printPARules(\%Gaddress_groups, \%Gaddresses, \%address_groups, \%addresses, \%services, \%service_groups, \%applications, \%application_groups, \%tags, \%rules, \@parentRules);
+        printSecurityRules(\%Gaddress_groups, \%Gaddresses, \%address_groups, \%addresses, \%services, \%service_groups, \%applications, \%application_groups, \%tags, \%rules, \@parentRules);
         undef @parentRules;
+
+        foreach my $nat (keys %nats) {
+                push (@parentRules, $nat);
+        }
+        printNATRules(\%Gaddress_groups, \%Gaddresses, \%address_groups, \%addresses, \%services, \%service_groups, \%applications, \%application_groups, \%tags, \%nats, \@parentRules);
+        undef @parentRules;
+
         exit;
 }
 
@@ -895,7 +908,7 @@ if (($debug) or ($dump)){
                 if ($database =~ /cma/){
                         printCPRules(\%address_groups, \%addresses, \%services, \%service_groups, \%exclGroups, \%rules, \@parentRules);
                 } else {
-                        printPARules(\%Gaddress_groups, \%Gaddresses, \%address_groups, \%addresses, \%services, \%service_groups, \%applications, \%application_groups, \%tags, \%rules, \@parentRules);
+                        printSecurityRules(\%Gaddress_groups, \%Gaddresses, \%address_groups, \%addresses, \%services, \%service_groups, \%applications, \%application_groups, \%tags, \%rules, \@parentRules);
                 }
                 undef @parentRules;
         }
@@ -974,7 +987,7 @@ if ($rule){
 
         my @unique_parentRules = do { my %seen; grep { !$seen{$_}++ } @parentRules };
 
-        printPARules(\%Gaddress_groups, \%Gaddresses, \%address_groups, \%addresses, \%services, \%service_groups, \%applications, \%application_groups, \%tags, \%rules, \@unique_parentRules);
+        printSecurityRules(\%Gaddress_groups, \%Gaddresses, \%address_groups, \%addresses, \%services, \%service_groups, \%applications, \%application_groups, \%tags, \%rules, \@unique_parentRules);
         exit;
 }
 
@@ -1006,124 +1019,148 @@ sub make_array_from_str {
     	return @data;
 }
 
+sub calculate_address_group_regex {
+
+    	my ( $address_groups_ref, $addresses_ref, $Gaddresses_ref, $Gaddress_groups_ref ) = @_;
+
+	foreach my $address_group (sort keys %$address_groups_ref){
+		my @ipvf_networks;
+		foreach my $member (sort @{ $$address_groups_ref{$address_group}{'members'}}){
+			next if ($member eq "placeholder");
+                	if (exists($$addresses_ref{$member})){
+                		if (exists($$addresses_ref{$member}{'cidr'})){
+					if ($$addresses_ref{$member}{'cidr'} !~ /:/){
+						# IPv6 not supported by create_iprange_regexp
+						push @ipvf_networks, $$addresses_ref{$member}{'cidr'};
+					}
+				}
+			}
+		}
+		if (@ipvf_networks){
+			$$address_groups_ref{$address_group}{'netre'} = create_iprange_regexp_depthfirst(@ipvf_networks);
+			undef @ipvf_networks;
+		}
+	}
+
+}
+
 sub read_panmanager_format {
 
-    # have to do the objects first and then the rules as cannot figure out nested groups otherwise
+	# have to do the objects first and then the rules as cannot figure out nested groups otherwise
 
-    my ( $applications_ref, $application_groups_ref, $application_filters_ref, $address_groups_ref, $addresses_ref, $services_ref, $service_groups_ref, $tags_ref, $zones_ref, $static_routes_ref, $dips_ref, $rules_ref, $nats_ref, $objFile, $dir ) = @_;
+    	my ( $applications_ref, $application_groups_ref, $application_filters_ref, $address_groups_ref, $addresses_ref, $services_ref, $service_groups_ref, $tags_ref, $zones_ref, $static_routes_ref, $dips_ref, $rules_ref, $nats_ref, $objFile, $dir ) = @_;
 
-    # dbedit_processed_objects, dbedit_processed_pre_rules, dbedit_processed_post_rules
-    my $csv_fields = 100;
+    	# dbedit_processed_objects, dbedit_processed_pre_rules, dbedit_processed_post_rules
+    	my $csv_fields = 100;
 
-    # set the fixed values for the numbered CSV fields
-    my $vendor = 0;
-    my $type = 1;
-    my $location = 3;
-    my $op_action = 2;
-    my $name = 4;
-    my $subtype = 5;
-    my $members = 6;
-    my $ip = 7;
-    my $netmask = 8;
-    my $cidr = 9;
-    my $description = 10;
-    my $color = 11;
-    my $protocol = 12;
-    my $source_port = 13;
-    my $destination_port = 14;
-    my $nexthop = 15;
-    my $tag = 16;
-    my $value = 17;
-    my $interface = 18;
-    my $enable_user_identification = 19;
-    my $metric = 20;
-    my $mgmt_profile = 21;
-    my $zone = 22;
-    my $rule_action = 23;
-    my $application = 24;
-    my $category = 25;
-    my $data_filtering = 26;
-    my $destination = 27;
-    my $disable_server_response_inspection = 28;
-    my $disabled = 29;
-    my $file_blocking = 30;
-    my $fromzone = 31;
-    my $group = 32;
-    my $hip_profiles = 33;
-    my $icmp_unreachable = 34;
-    my $log_end = 35;
-    my $log_setting = 36;
-    my $log_start = 37;
-    my $negate_destination = 38;
-    my $negate_source = 39;
-    my $negate_target = 40;
-    my $schedule = 41;
-    my $service = 42;
-    my $source = 43;
-    my $source_user = 44;
-    my $spyware = 45;
-    my $target = 46;
-    my $tozone = 47;
-    my $url_filtering = 48;
-    my $virus = 49;
-    my $vulnerability = 50;
-    my $wildfire_analysis = 51;
-    my $destination_dynamic_translated_address = 52;
-    my $destination_dynamic_translated_distribution = 53;
-    my $destination_dynamic_translated_port = 54;
-    my $destination_translated_address = 55;
-    my $destination_translated_port = 56;
-    my $ha_binding = 57;
-    my $nat_type = 58;
-    my $source_translation_address_type = 59;
-    my $source_translation_fallback_interface = 60;
-    my $source_translation_fallback_ip_address = 61;
-    my $source_translation_fallback_ip_type = 62;
-    my $source_translation_fallback_translated_addresses = 63;
-    my $source_translation_fallback_type = 64;
-    my $source_translation_interface = 65;
-    my $source_translation_ip_address = 66;
-    my $source_translation_static_bi_directional = 67;
-    my $source_translation_static_translated_address = 68;
-    my $source_translation_translated_addresses = 69;
-    my $source_translation_type = 70;
-    my $to_interface = 71;
-    my $category = 72;
-    my $subcategory = 73;
-    my $technology = 74;
-    my $risk = 75;
-    my $evasive = 76;
-    my $excessive_bandwidth_use = 77;
-    my $prone_to_misuse = 78;
-    my $is_saas = 79;
-    my $transfers_files = 80;
-    my $tunnels_other_apps = 81;
-    my $used_by_malware = 82;
-    my $has_known_vulnerabilities = 83;
-    my $pervasive = 84;
-    my $default_type = 85;
-    my $parent_app = 86;
-    my $timeout = 87;
-    my $tcp_timeout = 88;
-    my $udp_timeout = 89;
-    my $tcp_half_closed_timeout = 90;
-    my $tcp_time_wait_timeout = 91;
-    my $tunnel_applications = 92;
-    my $file_type_ident = 93;
-    my $virus_ident = 94;
-    my $data_ident = 95;
-    my $default_port = 96;
-    my $default_ip_protocol = 97;
-    my $default_icmp_type = 98;
-    my $default_icmp_code = 99;
+    	# set the fixed values for the numbered CSV fields
+    	my $vendor = 0;
+    	my $type = 1;
+    	my $location = 3;
+    	my $op_action = 2;
+    	my $name = 4;
+    	my $subtype = 5;
+    	my $members = 6;
+    	my $ip = 7;
+    	my $netmask = 8;
+    	my $cidr = 9;
+    	my $description = 10;
+    	my $color = 11;
+   	my $protocol = 12;
+    	my $source_port = 13;
+    	my $destination_port = 14;
+    	my $nexthop = 15;
+    	my $tag = 16;
+    	my $value = 17;
+    	my $interface = 18;
+    	my $enable_user_identification = 19;
+    	my $metric = 20;
+    	my $mgmt_profile = 21;
+   	my $zone = 22;
+    	my $rule_action = 23;
+    	my $application = 24;
+    	my $category = 25;
+    	my $data_filtering = 26;
+    	my $destination = 27;
+    	my $disable_server_response_inspection = 28;
+    	my $disabled = 29;
+    	my $file_blocking = 30;
+    	my $fromzone = 31;
+    	my $group = 32;
+    	my $hip_profiles = 33;
+    	my $icmp_unreachable = 34;
+    	my $log_end = 35;
+    	my $log_setting = 36;
+    	my $log_start = 37;
+    	my $negate_destination = 38;
+    	my $negate_source = 39;
+    	my $negate_target = 40;
+    	my $schedule = 41;
+    	my $service = 42;
+    	my $source = 43;
+    	my $source_user = 44;
+    	my $spyware = 45;
+    	my $target = 46;
+    	my $tozone = 47;
+    	my $url_filtering = 48;
+    	my $virus = 49;
+    	my $vulnerability = 50;
+    	my $wildfire_analysis = 51;
+    	my $destination_dynamic_translated_address = 52;
+    	my $destination_dynamic_translated_distribution = 53;
+    	my $destination_dynamic_translated_port = 54;
+    	my $destination_translated_address = 55;
+    	my $destination_translated_port = 56;
+    	my $ha_binding = 57;
+    	my $nat_type = 58;
+    	my $source_translation_address_type = 59;
+    	my $source_translation_fallback_interface = 60;
+    	my $source_translation_fallback_ip_address = 61;
+    	my $source_translation_fallback_ip_type = 62;
+    	my $source_translation_fallback_translated_addresses = 63;
+    	my $source_translation_fallback_type = 64;
+    	my $source_translation_interface = 65;
+    	my $source_translation_ip_address = 66;
+    	my $source_translation_static_bi_directional = 67;
+    	my $source_translation_static_translated_address = 68;
+    	my $source_translation_translated_addresses = 69;
+    	my $source_translation_type = 70;
+    	my $to_interface = 71;
+    	my $category = 72;
+    	my $subcategory = 73;
+    	my $technology = 74;
+    	my $risk = 75;
+    	my $evasive = 76;
+    	my $excessive_bandwidth_use = 77;
+    	my $prone_to_misuse = 78;
+    	my $is_saas = 79;
+    	my $transfers_files = 80;
+    	my $tunnels_other_apps = 81;
+    	my $used_by_malware = 82;
+    	my $has_known_vulnerabilities = 83;
+    	my $pervasive = 84;
+    	my $default_type = 85;
+    	my $parent_app = 86;
+    	my $timeout = 87;
+    	my $tcp_timeout = 88;
+    	my $udp_timeout = 89;
+    	my $tcp_half_closed_timeout = 90;
+    	my $tcp_time_wait_timeout = 91;
+    	my $tunnel_applications = 92;
+    	my $file_type_ident = 93;
+    	my $virus_ident = 94;
+    	my $data_ident = 95;
+    	my $default_port = 96;
+    	my $default_ip_protocol = 97;
+    	my $default_icmp_type = 98;
+    	my $default_icmp_code = 99;
 
-    # Create the CSV object
-    my $fh = new FileHandle;
-    my $csv = Text::CSV_XS->new ({ binary => 1, auto_diag => 1 });
-    open my $fh, "<:encoding(utf8)", "$dir/$objFile" or die "Cannot open $objFile: $!";
-    $csv->column_names ($csv->getline ($fh));
+    	# Create the CSV object
+    	my $fh = new FileHandle;
+    	my $csv = Text::CSV_XS->new ({ binary => 1, auto_diag => 1 });
+    	open my $fh, "<:encoding(utf8)", "$dir/$objFile" or die "Cannot open $objFile: $!";
+    	$csv->column_names ($csv->getline ($fh));
 
-    #while (my $href = $csv->getline_hr ($fh)) {
 	while ( my $row = $csv->getline($fh) ) {
         	# convert certain fields into arrays
         	my @members = make_array_from_str($row->[$members]);
@@ -1132,7 +1169,6 @@ sub read_panmanager_format {
         	if ($row->[$location] =~ /__/){
             		$row->[$location] = (split /__/, $row->[$location])[0];
         	}
-        	#if ($href->{objtype} eq "address"){
         	if ($row->[$type] eq 'address'){
             		$$addresses_ref{$row->[$name]} = $row->[$name];
             		$$addresses_ref{$row->[$name]}{'description'} = $row->[$description];
@@ -1155,8 +1191,8 @@ sub read_panmanager_format {
                 			$$addresses_ref{$row->[$name]}{'cidr'} = $net;
 				}
 				if (($$addresses_ref{$row->[$name]}{'cidr'} !~ /32$/) and ($$addresses_ref{$row->[$name]}{'cidr'} !~ /:/)){
-					push my @net, $$addresses_ref{$row->[$name]}{'cidr'};
-                    			$$addresses_ref{$row->[$name]}{'netre'} = create_iprange_regexp_depthfirst(@net);
+					push my @ipvf_networks, $$addresses_ref{$row->[$name]}{'cidr'};
+                    			$$addresses_ref{$row->[$name]}{'netre'} = create_iprange_regexp_depthfirst(@ipvf_networks);
 				}
             		} else {
 				foreach my $value (@values){
@@ -1218,38 +1254,44 @@ sub read_panmanager_format {
             		$$static_routes_ref{$row->[$name]}{'admin_dist'} = $row->[$admin_dist];
             		$$static_routes_ref{$row->[$name]}{'metric'} = $row->[$metric];
         	} elsif ($row->[$type] eq 'application'){
-            		$row->[$tunnel_applications] = make_array_from_str($row->[$tunnel_applications]);
-            		$row->[$default_port] = make_array_from_str($row->[$default_port]);
+            		my @tunnel_applications = make_array_from_str($row->[$tunnel_applications]);
+            		my @default_ports = make_array_from_str($row->[$default_port]);
             		$$applications_ref{$row->[$name]}{'name'} = $row->[$name];
             		$$applications_ref{$row->[$name]}{'description'} = $row->[$description];
             		$$applications_ref{$row->[$name]}{'category'} = $row->[$category];
           		$$applications_ref{$row->[$name]}{'subcategory'} = $row->[$subcategory];
             		$$applications_ref{$row->[$name]}{'technology'} = $row->[$technology];
           		$$applications_ref{$row->[$name]}{'risk'} = $row->[$risk];
-            $$applications_ref{$row->[$name]}{'default_type'} = $row->[$default_type];
-            $$applications_ref{$row->[$name]}{'default_port'} = $row->[$default_port];
-            $$applications_ref{$row->[$name]}{'default_ip_protocol'} = $row->[$default_ip_protocol];
-            $$applications_ref{$row->[$name]}{'default_icmp_type'} = $row->[$default_icmp_type];
-            $$applications_ref{$row->[$name]}{'default_icmp_code'} = $row->[$default_icmp_code];
-            $$applications_ref{$row->[$name]}{'parent_app'} = $row->[$parent_app];
-            $$applications_ref{$row->[$name]}{'timeout'} = $row->[$timeout];
-            $$applications_ref{$row->[$name]}{'tcp_timeout'} = $row->[$tcp_timeout];
-            $$applications_ref{$row->[$name]}{'udp_timeout'} = $row->[$udp_timeout];
-            $$applications_ref{$row->[$name]}{'tcp_half_closed_timeout'} = $row->[$tcp_half_closed_timeout];
-            $$applications_ref{$row->[$name]}{'tcp_time_wait_timeout'} = $row->[$tcp_time_wait_timeout];
-            $$applications_ref{$row->[$name]}{'evasive_behavior'} = $row->[$evasive];
-            $$applications_ref{$row->[$name]}{'consume_big_bandwidth'} = $row->[$excessive_bandwidth_use];
-            $$applications_ref{$row->[$name]}{'used_by_malware'} = $row->[$used_by_malware];
-            $$applications_ref{$row->[$name]}{'able_to_transfer_file'} = $row->[$transfers_files];
-            $$applications_ref{$row->[$name]}{'tunnel_applications'} = $row->[$tunnel_applications];
-            $$applications_ref{$row->[$name]}{'has_known_vulnerability'} = $row->[$has_known_vulnerabilities];
-            $$applications_ref{$row->[$name]}{'tunnel_other_application'} = $row->[$tunnels_other_apps];
-            $$applications_ref{$row->[$name]}{'prone_to_misuse'} = $row->[$prone_to_misuse];
-            $$applications_ref{$row->[$name]}{'file_type_ident'} = $row->[$file_type_ident];
-            $$applications_ref{$row->[$name]}{'pervasive_use'} = $row->[$pervasive];
-            $$applications_ref{$row->[$name]}{'virus_ident'} = $row->[$virus_ident];
-            $$applications_ref{$row->[$name]}{'data_ident'} = $row->[$data_ident];
-            $$applications_ref{$row->[$name]}{'tag'} = $row->[$tag];
+            		$$applications_ref{$row->[$name]}{'default_type'} = $row->[$default_type];
+			foreach my $default_port (@default_ports){
+            			push @{ $$applications_ref{$row->[$name]}{'default_port'}}, $default_port;
+			}
+            		$$applications_ref{$row->[$name]}{'default_ip_protocol'} = $row->[$default_ip_protocol];
+            		$$applications_ref{$row->[$name]}{'default_icmp_type'} = $row->[$default_icmp_type];
+            		$$applications_ref{$row->[$name]}{'default_icmp_code'} = $row->[$default_icmp_code];
+            		$$applications_ref{$row->[$name]}{'parent_app'} = $row->[$parent_app];
+            		$$applications_ref{$row->[$name]}{'timeout'} = $row->[$timeout];
+            		$$applications_ref{$row->[$name]}{'tcp_timeout'} = $row->[$tcp_timeout];
+            		$$applications_ref{$row->[$name]}{'udp_timeout'} = $row->[$udp_timeout];
+            		$$applications_ref{$row->[$name]}{'tcp_half_closed_timeout'} = $row->[$tcp_half_closed_timeout];
+            		$$applications_ref{$row->[$name]}{'tcp_time_wait_timeout'} = $row->[$tcp_time_wait_timeout];
+            		$$applications_ref{$row->[$name]}{'evasive_behavior'} = $row->[$evasive];
+            		$$applications_ref{$row->[$name]}{'consume_big_bandwidth'} = $row->[$excessive_bandwidth_use];
+            		$$applications_ref{$row->[$name]}{'used_by_malware'} = $row->[$used_by_malware];
+            		$$applications_ref{$row->[$name]}{'able_to_transfer_file'} = $row->[$transfers_files];
+			foreach my $tunnel_applications (@tunnel_applications){
+            			push @{ $$applications_ref{$row->[$name]}{'tunnel_applications'}}, $tunnel_applications;
+			}
+            		$$applications_ref{$row->[$name]}{'has_known_vulnerability'} = $row->[$has_known_vulnerabilities];
+            		$$applications_ref{$row->[$name]}{'tunnel_other_application'} = $row->[$tunnels_other_apps];
+            		$$applications_ref{$row->[$name]}{'prone_to_misuse'} = $row->[$prone_to_misuse];
+            		$$applications_ref{$row->[$name]}{'file_type_ident'} = $row->[$file_type_ident];
+            		$$applications_ref{$row->[$name]}{'pervasive_use'} = $row->[$pervasive];
+            		$$applications_ref{$row->[$name]}{'virus_ident'} = $row->[$virus_ident];
+            		$$applications_ref{$row->[$name]}{'data_ident'} = $row->[$data_ident];
+			foreach my $tag (@tags){
+            			push @{ $$applications_ref{$row->[$name]}{'tag'}}, $tag;
+			}
         	} elsif ($row->[$type] eq 'application-group'){
             		$$application_groups_ref{$row->[$name]} = $row->[$name];
 			foreach my $member (@members){
@@ -1259,278 +1301,179 @@ sub read_panmanager_format {
             			push @{ $$application_groups_ref{$row->[$name]}{'tag'}}, $tag;
 			}
         	} elsif ($row->[$type] eq 'application-filter'){
-            $$application_filters_ref{$row->[$name]} = $row->[$name];
+            		$$application_filters_ref{$row->[$name]} = $row->[$name];
 			foreach my $tag (@tags){
             			push @{ $$application_filters_ref{$row->[$name]}{'tag'}}, $tag;
 			}
-            $$application_filters_ref{$row->[$name]}{'category'} = $row->[$category];
-            $$application_filters_ref{$row->[$name]}{'subcategory'} = $row->[$subcategory];
-            $$application_filters_ref{$row->[$name]}{'technology'} = $row->[$technology];
-            $$application_filters_ref{$row->[$name]}{'risk'} = $row->[$risk];
-            $$application_filters_ref{$row->[$name]}{'evasive'} = $row->[$evasive];
-            $$application_filters_ref{$row->[$name]}{'excessive_bandwidth_use'} = $row->[$excessive_bandwidth_use];
-            $$application_filters_ref{$row->[$name]}{'prone_to_misuse'} = $row->[$prone_to_misuse];
-            $$application_filters_ref{$row->[$name]}{'is_saas'} = $row->[$is_saas];
-            $$application_filters_ref{$row->[$name]}{'transfers_files'} = $row->[$transfers_files];
-            $$application_filters_ref{$row->[$name]}{'tunnels_other_apps'} = $row->[$tunnels_other_apps];
-            $$application_filters_ref{$row->[$name]}{'used_by_malware'} = $row->[$used_by_malware];
-            $$application_filters_ref{$row->[$name]}{'has_known_vulnerabilities'} = $row->[$has_known_vulnerabilities];
-            $$application_filters_ref{$row->[$name]}{'pervasive'} = $row->[$pervasive];
-        } elsif ($row->[$type] =~ /[(pre|post)-]?security-rule/){
-            $row->[$application] = make_array_from_str($row->[$application]);
-            $row->[$category] = make_array_from_str($row->[$category]);
-            $row->[$destination] = make_array_from_str($row->[$destination]);
-            $row->[$fromzone] = make_array_from_str($row->[$fromzone]);
-            $row->[$hip_profiles] = make_array_from_str($row->[$hip_profiles]);
-            $row->[$service] = make_array_from_str($row->[$service]);
-            $row->[$source] = make_array_from_str($row->[$source]);
-            $row->[$source_user] = make_array_from_str($row->[$source_user]);
-            $row->[$target] = make_array_from_str($row->[$target]);
-            $row->[$tozone] = make_array_from_str($row->[$tozone]);
+            		$$application_filters_ref{$row->[$name]}{'category'} = $row->[$category];
+            		$$application_filters_ref{$row->[$name]}{'subcategory'} = $row->[$subcategory];
+            		$$application_filters_ref{$row->[$name]}{'technology'} = $row->[$technology];
+            		$$application_filters_ref{$row->[$name]}{'risk'} = $row->[$risk];
+            		$$application_filters_ref{$row->[$name]}{'evasive'} = $row->[$evasive];
+            		$$application_filters_ref{$row->[$name]}{'excessive_bandwidth_use'} = $row->[$excessive_bandwidth_use];
+            		$$application_filters_ref{$row->[$name]}{'prone_to_misuse'} = $row->[$prone_to_misuse];
+            		$$application_filters_ref{$row->[$name]}{'is_saas'} = $row->[$is_saas];
+            		$$application_filters_ref{$row->[$name]}{'transfers_files'} = $row->[$transfers_files];
+            		$$application_filters_ref{$row->[$name]}{'tunnels_other_apps'} = $row->[$tunnels_other_apps];
+            		$$application_filters_ref{$row->[$name]}{'used_by_malware'} = $row->[$used_by_malware];
+            		$$application_filters_ref{$row->[$name]}{'has_known_vulnerabilities'} = $row->[$has_known_vulnerabilities];
+            		$$application_filters_ref{$row->[$name]}{'pervasive'} = $row->[$pervasive];
+        	} elsif ($row->[$type] =~ /[(pre|post)-]?security-rule/){
+            		my @applications = make_array_from_str($row->[$application]);
+            		my @categories = make_array_from_str($row->[$category]);
+            		my @destinations = make_array_from_str($row->[$destination]);
+            		my @fromzones = make_array_from_str($row->[$fromzone]);
+            		my @hip_profiles = make_array_from_str($row->[$hip_profiles]);
+            		my @services = make_array_from_str($row->[$service]);
+            		my @sources = make_array_from_str($row->[$source]);
+            		my @source_users = make_array_from_str($row->[$source_user]);
+            		my @targets = make_array_from_str($row->[$target]);
+            		my @tozones = make_array_from_str($row->[$tozone]);
 
-            $$rules_ref{$row->[$name]}{'name'} = $row->[$name];
-            $$rules_ref{$row->[$name]}{'srczone'} = $row->[$fromzone];
-            $$rules_ref{$row->[$name]}{'srcaddr'}, $row->[$source];
+            		$$rules_ref{$row->[$name]}{'name'} = $row->[$name];
+			foreach my $zone (@fromzones){
+            			push @{ $$rules_ref{$row->[$name]}{'srczone'}}, $zone;
+			}
+			foreach my $source (@sources){
+            			push @{ $$rules_ref{$row->[$name]}{'srcaddr'}}, $source;
+			}
+			foreach my $user (@source_users){
+            			push @{ $$rules_ref{$row->[$name]}{'srcuser'}}, $user;
+			}
+			foreach my $zone (@tozone){
+            			push @{ $$rules_ref{$row->[$name]}{'dstzone'}}, $zone;
+			}
+			foreach my $destination (@destinations){
+            			push @{ $$rules_ref{$row->[$name]}{'dstaddr'}}, $destination;
+			}
 
-            my @ruleNets;
-            if ($data[$srcaddr] !~ /any/i){
-                    foreach my $srcObj (@{ $$rules_ref{$data[$name]}{'srcaddr'}}){
-                            if ($srcObj =~ /^G_/){
-                                    printMembersExpanded(\@{$$Gaddress_groups_ref{$srcObj}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@ruleNets, \%{$tags_ref});
-                            } else {
-                                    printMembersExpanded(\@{$$address_groups_ref{$srcObj}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@ruleNets, \%{$tags_ref});
-                            }
-                    }
-            }
-            $$rules_ref{$row->[$name]}{'srcuser'}, $row->[$source_user];
-            $$rules_ref{$row->[$name]}{'dstzone'} = $row->[$tozone];
-            $$rules_ref{$row->[$name]}{'dstaddr'},  $row->[$destination];
+			#
+			# populate @ruleNets
+			#
 
-            if ($data[$dstaddr] !~ /any/i){
-                    foreach my $dstObj (@{ $$rules_ref{$data[$name]}{'dstaddr'}}){
-                            if ($dstObj =~ /^G_/){
-                                    printMembersExpanded(\@{$$Gaddress_groups{$dstObj}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@ruleNets, \%{$tags_ref});
-                            } else {
-                                    printMembersExpanded(\@{$$address_groups{$dstObj}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@ruleNets, \%{$tags_ref});
-                            }
-                    }
-            }
-            # create re of src/dst nets for this rule
-            if (@ruleNets){
-                    $$rules_ref{$data[$name]}{'ruleNetsre'} = create_iprange_regexp_depthfirst(@ruleNets);
-            }
-            $$rules_ref{$row->[$name]}{'application'},  $row->[$application];
-            $$rules_ref{$row->[$name]}{'service'},  $row->[$service];
-            $$rules_ref{$row->[$name]}{'hip'} = $row->[$hip_profiles];
-            $$rules_ref{$row->[$name]}{'url'} = $row->[$url_filtering];
-            $$rules_ref{$row->[$name]}{'action'} = $row->[$rule_action];
-            $$rules_ref{$row->[$name]}{'description'} = $row->[$description];
-            $$rules_ref{$row->[$name]}{'tag'} = $row->[$tag];
-            $$rules_ref{$row->[$name]}{'category'} = $row->[$category];
-            $$rules_ref{$row->[$name]}{'data_filtering'} = $row->[$data_filtering];
-            $$rules_ref{$row->[$name]}{'disable_server_response_inspection'} = $row->[$disable_server_response_inspection];
-            $$rules_ref{$row->[$name]}{'disabled'} = $row->[$disabled];
-            $$rules_ref{$row->[$name]}{'file_blocking'} = $row->[$file_blocking];
-            $$rules_ref{$row->[$name]}{'group'} = $row->[$group];
-            $$rules_ref{$row->[$name]}{'icmp_unreachable'} = $row->[$icmp_unreachable];
-            $$rules_ref{$row->[$name]}{'log_end'} = $row->[$log_end];
-            $$rules_ref{$row->[$name]}{'log_setting'} = $row->[$log_setting];
-            $$rules_ref{$row->[$name]}{'log_start'} = $row->[$log_start];
-            $$rules_ref{$row->[$name]}{'negate_destination'} = $row->[$negate_destination];
-            $$rules_ref{$row->[$name]}{'negate_source'} = $row->[$negate_source];
-            $$rules_ref{$row->[$name]}{'negate_target'} = $row->[$negate_target];
-            $$rules_ref{$row->[$name]}{'schedule'} = $row->[$schedule];
-            $$rules_ref{$row->[$name]}{'spyware'} = $row->[$spyware];
-            $$rules_ref{$row->[$name]}{'target'} = $row->[$target];
-            $$rules_ref{$row->[$name]}{'type'} = $row->[$subtype];
-            $$rules_ref{$row->[$name]}{'virus'} = $row->[$virus];
-            $$rules_ref{$row->[$name]}{'vulnerability'} = $row->[$vulnerability];
-            $$rules_ref{$row->[$name]}{'wildfire_analysis'} = $row->[$wildfire_analysis];
-
-          } elsif ($row->[$type] =~ /[(pre|post)-]?nat-rule/){
-
-            $row->[$destination] = make_array_from_str($row->[$destination]);
-            $row->[$fromzone] = make_array_from_str($row->[$fromzone]);
-            $row->[$source] = make_array_from_str($row->[$source]);
-            $row->[$source_translation_fallback_translated_addresses] = make_array_from_str($row->[$source_translation_fallback_translated_addresses]);
-            $row->[$source_translation_translated_addresses] = make_array_from_str($row->[$source_translation_translated_addresses]);
-            $row->[$target] = make_array_from_str($row->[$target]);
-            $row->[$tozone] = make_array_from_str($row->[$tozone]);
-
-            $$nats_ref{$row->[$name]}{'name'} = $row->[$name];
-            $$nats_ref{$row->[$name]}{'description'} = $row->[$description];
-            $$nats_ref{$row->[$name]}{'destination'} = $row->[$destination];
-            $$nats_ref{$row->[$name]}{'destination_dynamic_translated_address'} = $row->[$destination_dynamic_translated_address];
-            $$nats_ref{$row->[$name]}{'destination_dynamic_translated_distribution'} = $row->[$destination_dynamic_translated_distribution];
-            $$nats_ref{$row->[$name]}{'destination_dynamic_translated_port'} = $row->[$destination_dynamic_translated_port];
-            $$nats_ref{$row->[$name]}{'destination_translated_address'} = $row->[$destination_translated_address];
-            $$nats_ref{$row->[$name]}{'destination_translated_port'} = $row->[$destination_translated_port];
-            $$nats_ref{$row->[$name]}{'disabled'} = $row->[$disabled];
-            $$nats_ref{$row->[$name]}{'fromzone'} = $row->[$fromzone];
-            $$nats_ref{$row->[$name]}{'ha_binding'} = $row->[$ha_binding];
-            $$nats_ref{$row->[$name]}{'nat_type'} = $row->[$nat_type];
-            $$nats_ref{$row->[$name]}{'negate_target'} = $row->[$negate_target];
-            $$nats_ref{$row->[$name]}{'service'} = $row->[$service];
-            $$nats_ref{$row->[$name]}{'source'} = $row->[$source];
-            $$nats_ref{$row->[$name]}{'source_translation_address_type'} = $row->[$source_translation_address_type];
-            $$nats_ref{$row->[$name]}{'source_translation_fallback_interface'} = $row->[$source_translation_fallback_interface];
-            $$nats_ref{$row->[$name]}{'source_translation_fallback_ip_address'} = $row->[$source_translation_fallback_ip_address];
-            $$nats_ref{$row->[$name]}{'source_translation_fallback_ip_type'} = $row->[$source_translation_fallback_ip_type];
-            $$nats_ref{$row->[$name]}{'source_translation_fallback_translated_addresses'} = $row->[$source_translation_fallback_translated_addresses];
-            $$nats_ref{$row->[$name]}{'source_translation_fallback_type'} = $row->[$source_translation_fallback_type];
-            $$nats_ref{$row->[$name]}{'source_translation_interface'} = $row->[$source_translation_interface];
-            $$nats_ref{$row->[$name]}{'source_translation_ip_address'} = $row->[$source_translation_ip_address];
-            $$nats_ref{$row->[$name]}{'source_translation_static_bi_directional'} = $row->[$source_translation_static_bi_directional];
-            $$nats_ref{$row->[$name]}{'source_translation_static_translated_address'} = $row->[$source_translation_static_translated_address];
-            $$nats_ref{$row->[$name]}{'source_translation_translated_addresses'} = $row->[$source_translation_translated_addresses];
-            $$nats_ref{$row->[$name]}{'source_translation_type'} = $row->[$source_translation_type];
-            $$nats_ref{$row->[$name]}{'tag'} = $row->[$tag];
-            $$nats_ref{$row->[$name]}{'target'} = $row->[$target];
-            $$nats_ref{$row->[$name]}{'to_interface'} = $row->[$interface];
-            $$nats_ref{$row->[$name]}{'tozone'} = $row->[$tozone];
-        }
-    }
-    $fh->close();
-}
-
-sub readPARules (\$\$\%\%\%\%\%\%) {
-
-        my $objFile = shift;
-        my $dgDir = shift;
-        my $rules_ref = shift;
-        my $address_groups_ref = shift;
-        my $addresses_ref = shift;
-        my $tags_ref = shift;
-        my $Gaddress_groups_ref = shift;
-        my $Gaddresses_ref = shift;
-
-        # set fields from .rules file
-        my $name = "0";
-        my $type = "1";
-        my $srczone = "2";
-        my $srcaddr = "3";
-        my $srcuser = "4";
-        my $dstzone = "5";
-        my $dstaddr = "6";
-        my $app = "7";
-        my $service = "8";
-        my $hip = "9";
-        my $url = "10";
-        my $ruletype = "11";
-        my $logstart = "12";
-        my $disabled = "13";
-        my $action = "14";
-        my $tagfield = "15";
-        my $description = "16";
-
-        my $fh = new FileHandle;
-        $fh->open("<$dgDir/$objFile") or die "cannot open $dgDir/$objFile - $!";
-        while(<$fh>) {
-                chomp($_);
-                my @data = split /\,/, $_;
-                if ($data[$type] eq 'rule'){
-                        # DCAG Pool User Drop Restricted,rule,[MGT],[G_GLOBAL-DCAG_POOL_NETWORKS],[any],[ENAP|ISG_VPN],[GLOBAL-DCAG_RESTRICTED_NETWORKS],[any],[any],[any],[any],,,,drop,,
-                        next if ($data[$disabled] eq "yes");
-                        next if (!$data[$srczone]);
-
-                        $$rules_ref{$data[$name]}{'name'} = $data[$name];
-                        $$rules_ref{$data[$name]}{'srczone'} = $data[$srczone];
-                        $data[$srcaddr] =~ s/^\[|\]$//g; # remove bookends
-                        if ($data[$srcaddr] =~ /\|/ ){
-                                my @members = split /\|/, $data[$srcaddr];
-                                foreach (@members){
-                                        push @{ $$rules_ref{$data[$name]}{'srcaddr'}}, $_;
-                                }
-                        } else {
-                                push @{ $$rules_ref{$data[$name]}{'srcaddr'}}, $data[$srcaddr];
-                        }
-                        my @ruleNets;
-                        if ($data[$srcaddr] !~ /any/i){
-                                foreach my $srcObj (@{ $$rules_ref{$data[$name]}{'srcaddr'}}){
-                                        if ($srcObj =~ /^G_/){
-                                                printMembersExpanded(\@{$$Gaddress_groups_ref{$srcObj}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@ruleNets, \%{$tags_ref});
-                                        } else {
-                                                printMembersExpanded(\@{$$address_groups_ref{$srcObj}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@ruleNets, \%{$tags_ref});
-                                        }
+			my @networks;
+                        if ($row->[$source] !~ /any/i){
+                                foreach my $source (@sources){
+                                        printMembersExpanded(\@{$$address_groups_ref{$source}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@networks, \%{$tags_ref});
                                 }
                         }
-                        $data[$srcuser] =~ s/^\[|\]$//g; # remove bookends
-                        if ($data[$srcuser] =~ /\|/ ){
-                                @members = split /\|/, $data[$srcuser];
-                                foreach (@members){
-                                        push @{ $$rules_ref{$data[$name]}{'srcuser'}}, $_;
-                                }
-                        } else {
-                                push @{ $$rules_ref{$data[$name]}{'srcuser'}}, $data[$srcuser];
-                        }
-                        $$rules_ref{$data[$name]}{'dstzone'} = $data[$dstzone];
-                        $data[$dstaddr] =~ s/^\[|\]$//g; # remove bookends
-                        if ($data[$dstaddr] =~ /\|/ ){
-                                @members = split /\|/, $data[$dstaddr];
-                                foreach (@members){
-                                        push @{ $$rules_ref{$data[$name]}{'dstaddr'}}, $_;
-                                }
-                        } else {
-                                push @{ $$rules_ref{$data[$name]}{'dstaddr'}},  $data[$dstaddr];
-                        }
-                        if ($data[$dstaddr] !~ /any/i){
-                                foreach my $dstObj (@{ $$rules_ref{$data[$name]}{'dstaddr'}}){
-                                        if ($dstObj =~ /^G_/){
-                                                printMembersExpanded(\@{$$Gaddress_groups{$dstObj}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@ruleNets, \%{$tags_ref});
-                                        } else {
-                                                printMembersExpanded(\@{$$address_groups{$dstObj}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@ruleNets, \%{$tags_ref});
-                                        }
-                                }
-                        }
-                        # create re of src/dst nets for this rule
-                        if (@ruleNets){
-                                $$rules_ref{$data[$name]}{'ruleNetsre'} = create_iprange_regexp_depthfirst(@ruleNets);
-                        }
-                        $data[$app] =~ s/^\[|\]$//g; # remove bookends
-                        if ($data[$app] =~ /\|/ ){
-                                @members = split /\|/, $data[$app];
-                                foreach (@members){
-                                        push @{ $$rules_ref{$data[$name]}{'application'}},  $_;
-                                }
-                        } else {
-                                push @{ $$rules_ref{$data[$name]}{'application'}},  $data[$app];
-                        }
-                        $data[$service] =~ s/^\[|\]$//g; # remove bookends
-                        if ($data[$service] =~ /\|/ ){
-                                @members = split /\|/, $data[$service];
-                                foreach (@members){
-                                        push @{ $$rules_ref{$data[$name]}{'service'}},  $_;
-                                }
-                        } else {
-                                push @{ $$rules_ref{$data[$name]}{'service'}},  $data[$service];
-                        }
-                        if ($data[$hip]){
-                                $$rules_ref{$data[$name]}{'hip'} = $data[$hip];
-                        }
-                        if ($data[$url]){
-                                $$rules_ref{$data[$name]}{'url'} = $data[$url];
-                        }
-                        if ($data[$ruletype]){
-                                $$rules_ref{$data[$name]}{'ruletype'} = $data[$ruletype];
-                        }
-                        if ($data[$logstart]){
-                                $$rules_ref{$data[$name]}{'logstart'} = $data[$logstart];
-                        }
-                        if ($data[$disabled]){
-                                $$rules_ref{$data[$name]}{'disabled'} = $data[$disabled];
-                        }
-                        if ($data[$action]){
-                                $$rules_ref{$data[$name]}{'action'} = $data[$action];
-                        }
-                        if ($data[$tagfield]){
-                                $rules{$data[$name]}{'tag'} = $data[$tagfield];
-                        }
-                        if ($data[$description]){
-                                $rules{$data[$name]}{'description'} = $data[$description];
-                        }
-                }
-        }
-        $fh->close();
+            		if ($row->[$destination] !~ /any/i){
+                    		foreach my $destination (@destinations){
+                                	printMembersExpanded(\@{$$address_groups{$destination}{'members'}}, \%{$address_groups_ref}, \%{$Gaddress_groups_ref}, \%{$addresses_ref}, \%{$Gaddresses_ref}, 2, \@networks, \%{$tags_ref});
+                    		}
+			}
+            		# create re of src/dst nets for this rule
+            		if (@networks){
+				my @ipvf_networks;
+				foreach my $network (@networks){
+					if ($network !~ /:/){
+						push @ipvf_networks, $network;
+					}
+				}
+				if (@ipvf_networks){
+                    			$$rules_ref{$row->[$name]}{'netre'} = create_iprange_regexp_depthfirst(@ipvf_networks);
+				}
+            		}
+
+			foreach my $app (@applications){
+            			push @{ $$rules_ref{$row->[$name]}{'application'}}, $app;
+			}
+			foreach my $service (@services){
+            			push @{ $$rules_ref{$row->[$name]}{'service'}}, $service;
+			}
+			foreach my $hip (@hip_profiles){
+            			push @{ $$rules_ref{$row->[$name]}{'hip'}}, $hip;
+			}
+            		$$rules_ref{$row->[$name]}{'url'} = $row->[$url_filtering];
+            		$$rules_ref{$row->[$name]}{'action'} = $row->[$rule_action];
+            		$$rules_ref{$row->[$name]}{'description'} = $row->[$description];
+			foreach my $tag (@tags){
+            			push @{ $$rules_ref{$row->[$name]}{'tag'}}, $tag;
+			}
+			foreach my $category (@categories){
+            			push @{ $$rules_ref{$row->[$name]}{'category'}}, $category;
+			}
+            		$$rules_ref{$row->[$name]}{'data_filtering'} = $row->[$data_filtering];
+            		$$rules_ref{$row->[$name]}{'disable_server_response_inspection'} = $row->[$disable_server_response_inspection];
+            		$$rules_ref{$row->[$name]}{'disabled'} = $row->[$disabled];
+            		$$rules_ref{$row->[$name]}{'file_blocking'} = $row->[$file_blocking];
+            		$$rules_ref{$row->[$name]}{'group'} = $row->[$group];
+            		$$rules_ref{$row->[$name]}{'icmp_unreachable'} = $row->[$icmp_unreachable];
+            		$$rules_ref{$row->[$name]}{'log_end'} = $row->[$log_end];
+            		$$rules_ref{$row->[$name]}{'log_setting'} = $row->[$log_setting];
+            		$$rules_ref{$row->[$name]}{'log_start'} = $row->[$log_start];
+            		$$rules_ref{$row->[$name]}{'negate_destination'} = $row->[$negate_destination];
+            		$$rules_ref{$row->[$name]}{'negate_source'} = $row->[$negate_source];
+            		$$rules_ref{$row->[$name]}{'negate_target'} = $row->[$negate_target];
+            		$$rules_ref{$row->[$name]}{'schedule'} = $row->[$schedule];
+            		$$rules_ref{$row->[$name]}{'spyware'} = $row->[$spyware];
+			foreach my $target (@targets){
+            			push @{ $$rules_ref{$row->[$name]}{'target'}}, $target;
+			}
+            		$$rules_ref{$row->[$name]}{'type'} = $row->[$subtype];
+            		$$rules_ref{$row->[$name]}{'virus'} = $row->[$virus];
+            		$$rules_ref{$row->[$name]}{'vulnerability'} = $row->[$vulnerability];
+            		$$rules_ref{$row->[$name]}{'wildfire_analysis'} = $row->[$wildfire_analysis];
+
+		} elsif ($row->[$type] =~ /[(pre|post)-]?nat-rule/){
+
+            		my @destinations = make_array_from_str($row->[$destination]);
+            		my @fromzones = make_array_from_str($row->[$fromzone]);
+            		my @sources = make_array_from_str($row->[$source]);
+            		my @targets = make_array_from_str($row->[$target]);
+            		my @source_translation_fallback_translated_addresses = make_array_from_str($row->[$source_translation_fallback_translated_addresses]);
+            		my @source_translation_translated_addresses = make_array_from_str($row->[$source_translation_translated_addresses]);
+
+            		$$nats_ref{$row->[$name]}{'name'} = $row->[$name];
+            		$$nats_ref{$row->[$name]}{'description'} = $row->[$description];
+			foreach my $destination (@destinations){
+            			push @{ $$nats_ref{$row->[$name]}{'dstaddr'}}, $destination;
+			}
+            		$$nats_ref{$row->[$name]}{'destination_dynamic_translated_address'} = $row->[$destination_dynamic_translated_address];
+            		$$nats_ref{$row->[$name]}{'destination_dynamic_translated_distribution'} = $row->[$destination_dynamic_translated_distribution];
+            		$$nats_ref{$row->[$name]}{'destination_dynamic_translated_port'} = $row->[$destination_dynamic_translated_port];
+            		$$nats_ref{$row->[$name]}{'destination_translated_address'} = $row->[$destination_translated_address];
+            		$$nats_ref{$row->[$name]}{'destination_translated_port'} = $row->[$destination_translated_port];
+            		$$nats_ref{$row->[$name]}{'disabled'} = $row->[$disabled];
+			foreach my $zone (@fromzones){
+            			push @{ $$nats_ref{$row->[$name]}{'srczone'}}, $zone;
+			}
+            		$$nats_ref{$row->[$name]}{'ha_binding'} = $row->[$ha_binding];
+            		$$nats_ref{$row->[$name]}{'nat_type'} = $row->[$nat_type];
+            		$$nats_ref{$row->[$name]}{'negate_target'} = $row->[$negate_target];
+            		$$nats_ref{$row->[$name]}{'service'} = $row->[$service];
+			foreach my $source (@sources){
+            			push @{ $$nats_ref{$row->[$name]}{'srcaddr'}}, $source;
+			}
+            		$$nats_ref{$row->[$name]}{'source_translation_address_type'} = $row->[$source_translation_address_type];
+            		$$nats_ref{$row->[$name]}{'source_translation_fallback_interface'} = $row->[$source_translation_fallback_interface];
+            		$$nats_ref{$row->[$name]}{'source_translation_fallback_ip_address'} = $row->[$source_translation_fallback_ip_address];
+            		$$nats_ref{$row->[$name]}{'source_translation_fallback_ip_type'} = $row->[$source_translation_fallback_ip_type];
+			foreach my $blah (@source_translation_fallback_translated_addresses){
+            			push @{ $$nats_ref{$row->[$name]}{'source_translation_fallback_translated_addresses'}}, $blah;
+			}
+            		$$nats_ref{$row->[$name]}{'source_translation_fallback_type'} = $row->[$source_translation_fallback_type];
+            		$$nats_ref{$row->[$name]}{'source_translation_interface'} = $row->[$source_translation_interface];
+            		$$nats_ref{$row->[$name]}{'source_translation_ip_address'} = $row->[$source_translation_ip_address];
+            		$$nats_ref{$row->[$name]}{'source_translation_static_bi_directional'} = $row->[$source_translation_static_bi_directional];
+            		$$nats_ref{$row->[$name]}{'source_translation_static_translated_address'} = $row->[$source_translation_static_translated_address];
+			foreach my $blah (@source_translation_translated_addresses){
+            			push @{ $$nats_ref{$row->[$name]}{'source_translation_translated_addresses'}}, $blah;
+			}
+            		$$nats_ref{$row->[$name]}{'source_translation_type'} = $row->[$source_translation_type];
+			foreach my $tag (@tags){
+            			push @{ $$nats_ref{$row->[$name]}{'tag'}}, $tag;
+			}
+			foreach my $target (@targets){
+            			push @{ $$nats_ref{$row->[$name]}{'target'}}, $target;
+			}
+            		$$nats_ref{$row->[$name]}{'interface'} = $row->[$interface];
+			my $z = $row->[$tozone]; 
+			$z =~ s/[\[\]']+//g; # remove bookends and single quotes
+            		$$nats_ref{$row->[$name]}{'dstzone'} = $z;
+        	}
+    	}
+    	$fh->close();
 }
 
 sub findtaguse {
@@ -1573,7 +1516,7 @@ sub readAppIDs {
                 $$appids_ref{$data[$appID]}{'id'} = $data[$appID];
                 $$appids_ref{$data[$appID]}{'name'} = $data[$appName];
                 $$appids_ref{$data[$appID]}{'category'} = $data[$appCategory];
-                if (defined $data[$defaultPorts]){
+                if ($data[$defaultPorts]){
                         if ($data[$defaultPorts] =~ /\,/ ){
                                 my @members = split /\,/, $data[$defaultPorts];
                                 foreach (@members){
@@ -1583,7 +1526,7 @@ sub readAppIDs {
                                 push @{ $$appids_ref{$data[$appID]}{'ports'}}, $data[$defaultPorts];
                         }
                 }
-                if (defined $data[$dependents]){
+                if ($data[$dependents]){
                         if ($data[$dependents] =~ /\,/ ){
                                 my @members = split /\,/, $data[$dependents];
                                 foreach (@members){
@@ -1593,7 +1536,7 @@ sub readAppIDs {
                                 push @{ $$appids_ref{$data[$appID]}{'dependents'}}, $data[$dependents];
                         }
                 }
-                if (defined $data[$implied]){
+                if ($data[$implied]){
                         if ($data[$implied] =~ /\,/ ){
                                 my @members = split /\,/, $data[$implied];
                                 foreach (@members){
@@ -1627,7 +1570,7 @@ sub findParentRules {
 
         # add for 'srcuser' and 'description'?
         foreach my $rule (keys %$rules_ref) {
-                if (($objType eq "tag") or ($objType eq "address") or ($objType eq "addressgrp") or ($objType eq "exclgrp")){
+                if (($objType eq "tag") or ($objType eq "address") or ($objType eq "addressgrp")){
                         if (( grep /$objName/, @{$$rules_ref{$rule}{'srcaddr'}} ) || ( grep /$objName/, @{$$rules_ref{$rule}{'dstaddr'}} )){
                                 push (@$parentRules_ref, $rule);
                         }
@@ -1640,7 +1583,7 @@ sub findParentRules {
                                 push (@$parentRules_ref, $rule);
                         }
                 } elsif ($objType eq "NETRE"){
-                        if (match_ip($objName, $$rules_ref{$rule}{'ruleNetsre'})){
+                        if (match_ip($objName, $$rules_ref{$rule}{'netre'})){
                                 push (@$parentRules_ref, $rule);
                         }
                 }
@@ -1805,7 +1748,7 @@ sub printObjType {
 	}
 }
 
-sub printPARules (\%\%\%\%\%\%\%\%\%\%\@) {
+sub printSecurityRules (\%\%\%\%\%\%\%\%\%\%\@) {
 
         my $Gaddress_groups_ref = shift;
         my $Gaddresses_ref = shift;
@@ -1820,10 +1763,13 @@ sub printPARules (\%\%\%\%\%\%\%\%\%\%\@) {
         my $matchedRules_ref = shift;
 
         # print out the matched rules
-        print "Rule Name,Src Zone,Src Address,Src User,Dest Address,Dest Zone,Application,Service,HIP,URL,Ruletype,Logstart,Disabled,Action,Tag,Description\n";
+	if (@$matchedRules_ref){
+        	print "Rule Name,Src Zone,Src Address,Src User,Dest Address,Dest Zone,Application,Service,HIP,URL,Ruletype,Logstart,Disabled,Action,Tag,Target,Description\n";
+	}
         foreach my $rule (@{$matchedRules_ref}){
                 print "$$rules_ref{$rule}{'name'},";
-                print "$$rules_ref{$rule}{'srczone'},";
+                printMembers(\@{$$rules_ref{$rule}{'srczone'}});
+                print ",";
                 foreach my $src (@{$$rules_ref{$rule}{'srcaddr'}}) {
                         print "$src";
                         if ($src ne 'any'){
@@ -1843,7 +1789,7 @@ sub printPARules (\%\%\%\%\%\%\%\%\%\%\@) {
                         }
                 }
                 print ",";
-                printMembers(\@{$$rules_ref{$rule}{'source_user'}});
+                printMembers(\@{$$rules_ref{$rule}{'srcuser'}});
                 print ",";
                 foreach my $dst (@{$$rules_ref{$rule}{'dstaddr'}}) {
                         print "$dst";
@@ -1863,7 +1809,9 @@ sub printPARules (\%\%\%\%\%\%\%\%\%\%\@) {
                                 }
                         }
                 }
-                print ",$$rules_ref{$rule}{'dstzone'},";
+                print ",";
+                printMembers(\@{$$rules_ref{$rule}{'dstzone'}});
+                print ",";
                 foreach my $appid (@{$$rules_ref{$rule}{'application'}}) {
                         print "$appid";
                         if ($appid ne 'any'){
@@ -1879,14 +1827,98 @@ sub printPARules (\%\%\%\%\%\%\%\%\%\%\@) {
                         }
                         printMembers(\@{$$service_groups_ref{$service}{'members'}});
                 }
-                print ",$$rules_ref{$rule}{'hip'},";
-                print "$$rules_ref{$rule}{'url'},";
+                print ",";
+                printMembers(\@{$$rules_ref{$rule}{'hip'}});
+                print ",";
+		# URL Categories
+                printMembers(\@{$$rules_ref{$rule}{'categories'}});
+                print ",";
                 print "$$rules_ref{$rule}{'ruletype'},";
                 print "$$rules_ref{$rule}{'log_start'},";
                 print "$$rules_ref{$rule}{'disabled'},";
                 print "$$rules_ref{$rule}{'action'},";
-                print "$$rules_ref{$rule}{'tag'},";
+                printMembers(\@{$$rules_ref{$rule}{'tag'}});
+                print ",";
+                printMembers(\@{$$rules_ref{$rule}{'target'}});
+                print ",";
                 print "$$rules_ref{$rule}{'description'}\n";
+        }
+}
+
+sub printNATRules (\%\%\%\%\%\%\%\%\%\%\@) {
+
+        my $Gaddress_groups_ref = shift;
+        my $Gaddresses_ref = shift;
+        my $address_groups_ref = shift;
+        my $addresses_ref = shift;
+        my $services_ref = shift;
+        my $service_groups_ref = shift;
+        my $applications_ref = shift;
+        my $application_groups_ref = shift;
+        my $tags_ref = shift;
+        my $nats_ref = shift;
+        my $matchedRules_ref = shift;
+
+        # print out the matched rules
+	if (@$matchedRules_ref){
+        	print "NAT Rule Name,Tags,Src Zone,Dest Zone,Dest Interface,Src Address,Dest Address,Service,Src Translation,Dst Translation,Disabled,ha binding,nat type,negate target,Target,Description\n";
+	}
+        foreach my $rule (@{$matchedRules_ref}){
+                print "$$nats_ref{$rule}{'name'},";
+                printMembers(\@{$$nats_ref{$rule}{'tag'}});
+                print ",";
+                printMembers(\@{$$nats_ref{$rule}{'srczone'}});
+                print ",";
+                print "$$nats_ref{$rule}{'dstzone'},";
+		print "$$nats_ref{$rule}{'interface'},";
+                foreach my $src (@{$$nats_ref{$rule}{'srcaddr'}}) {
+                        print "$src";
+                        if ($src ne 'any'){
+                                print ";";
+                                printMembers(\@{$$address_groups_ref{$src}{'members'}});
+                        }
+                }
+                print ",";
+                foreach my $dst (@{$$nats_ref{$rule}{'dstaddr'}}) {
+                        print "$dst";
+                        if ($dst ne 'any'){
+                                print ";";
+                                printMembers(\@{$$address_groups_ref{$dst}{'members'}});
+                        }
+                }
+                print ",";
+                print "$$nats_ref{$rule}{'service'},";
+
+		# begin source xlate info
+                print "$$nats_ref{$rule}{'source_translation_address_type'}|";
+                print "$$nats_ref{$rule}{'source_translation_fallback_interface'}|"; 
+                print "$$nats_ref{$rule}{'source_translation_fallback_ip_address'}|";
+                print "$$nats_ref{$rule}{'source_translation_fallback_ip_type'}|";
+                printMembers(\@{$$rules_ref{$rule}{'source_translation_fallback_translated_addresses'}});
+                print "|";
+                print "$$nats_ref{$rule}{'source_translation_fallback_type'}|";
+                print "$$nats_ref{$rule}{'source_translation_interface'}|";
+                print "$$nats_ref{$rule}{'source_translation_ip_address'}|";
+                print "$$nats_ref{$rule}{'source_translation_static_bi_directional'}|";
+                print "$$nats_ref{$rule}{'source_translation_static_translated_address'}|";
+                printMembers(\@{$$rules_ref{$rule}{'source_translation_translated_addresses'}});
+                print "|";
+                print "$$nats_ref{$rule}{'source_translation_type'},";
+
+		# begin destination xlate info
+                print "$$nats_ref{$rule}{'destination_dynamic_translated_address'}|";
+                print "$$nats_ref{$rule}{'destination_dynamic_translated_distribution'}|";
+                print "$$nats_ref{$rule}{'destination_dynamic_translated_port'}|";
+                print "$$nats_ref{$rule}{'destination_translated_address'}|";
+                print "$$nats_ref{$rule}{'destination_translated_port'},";
+
+		print "$$nats_ref{$rule}{'disabled'},";                   
+              	print "$$nats_ref{$rule}{'ha_binding'},";
+                print "$$nats_ref{$rule}{'nat_type'},";
+                print "$$nats_ref{$rule}{'negate_target'},";
+                printMembers(\@{$$rules_ref{$rule}{'target'}});
+                print ",";
+                print "$$nats_ref{$rule}{'description'}\n";
         }
 }
 
@@ -1905,12 +1937,12 @@ sub usage {
         print "			 				: --match will find all nested groups that object indirectly appears in (e.g. not just parent groups)\n";
         print "\t--ip <ip> [--match]				: lists IP and explicit matching objects. Also lists any address groups/tags the matched object is a member of\n";
         print "							: --match will find implicit match in address groups and print containing cidr (e.g. within netmask)\n";
-        print "\t--rule {object name|ip} [{--match|--debug}]	: lists rules with expanded fields for given object or explicit IP (will find objects hidden in groups)\n";
+        print "\t--rule {object name|ip} [--match]		: lists rules with expanded fields for given object or explicit IP (will find objects hidden in groups)\n";
         print "							: --match if IP provided will find implicit match, e.g. if IP would match /24 object in rule\n";
-        print "							: --debug debug printing information\n";
-        print "\t--dump {csv|json} [--policy] [--shared]		: prints the database, expanded tags and rules\n";
+        print "\t--debug						: debug printing information\n";
+        print "\t--dump [{--policy|--nats}]			: prints the database, expanded tags and rules\n";
         print "							: --policy prints expanded rules only\n";
-        print "							: --shared prints shared/device group rules as well\n\n";
+        print "							: --nats prints expanded nats only\n\n";
 
         print "Examples:\n\n";
         print "\tsudo panquery.pl --db panmanager-output-file.csv --list types\n";
@@ -1937,9 +1969,9 @@ sub usage {
         print "\tsudo panquery.pl --db panmanager-output-file.csv --rule <tag> --debug\n";
         print "\tsudo panquery.pl --db panmanager-output-file.csv --rule 8.8.8.8\n";
         print "\tsudo panquery.pl --db panmanager-output-file.csv --rule 8.8.8.8 --match\n";
-        print "\tsudo panquery.pl --db panmanager-output-file.csv --dump csv\n";
-        print "\tsudo panquery.pl --db panmanager-output-file.csv --dump csv --policy\n";
-        print "\tsudo panquery.pl --db panmanager-output-file.csv --dump json\n";
+        print "\tsudo panquery.pl --db panmanager-output-file.csv --dump\n";
+        print "\tsudo panquery.pl --db panmanager-output-file.csv --dump --policy\n";
+        print "\tsudo panquery.pl --db panmanager-output-file.csv --dump --nats\n";
 
 }
 
