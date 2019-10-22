@@ -2,7 +2,7 @@
 
 panquery (v1.0) - Query tool for firewall databases created with panmanager
 
-Panquery is a CLI tool for Palo Alto database files create with panmanager. Panquery can list objects, find implicit/explicit policy matches, print expanded rules (eg groups + members) and show unused objects.
+Panquery is a CLI tool for Palo Alto database files created with panmanager. Panquery can list objects, find implicit/explicit policy matches, print expanded rules (eg groups + members) and show used/unused objects.
 
 The following output is from the script help:
 
