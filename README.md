@@ -12,20 +12,19 @@ Usage:
 
 Options:
 
-	--list {types|type|all} 			      : lists available object types, all object names of 'type x' or all objects
-	--obj <name> [{--ipvf|--regex}]			: lists object contents exactly matching <name>
-							                        : --ipvf outputs ip/cidr format for address/address-group objects
-							                        : --regexp outputs object names matching pattern
-	--grp <name> [--match]				      : lists parent groups for object matching <name>
-			 				                        : --match will find all nested groups that object indirectly appears in (e.g. not just parent groups)
-	--ip <ip> [--match]				          : lists IP and explicit matching objects. Also lists any address groups/tags the matched object is a member of
-							                        : --match will find implicit match in address groups and print containing cidr (e.g. within netmask)
-	--rule {object name|ip} [--match]		: lists rules with expanded fields for given object or explicit IP (will find objects hidden in groups)
-							                        : --match if IP provided will find implicit match, e.g. if IP would match /24 object in rule
-	--debug						                  : debug printing information
-	--dump [{--policy|--nats}]			    : prints the database, expanded tags and rules
-							                        : --policy prints expanded rules only
-							                        : --nats prints expanded nats only
+	--list {types|type|all} 		: lists available object types, all object names of 'type x' or all objects
+	--obj <name> [{--ipvf|--regex}]		: lists object contents exactly matching <name>
+						: --ipvf outputs ip/cidr format for address/address-group objects
+						: --regexp outputs object names matching pattern
+	--grp <name> [--match]			: lists parent groups for object matching <name>
+			 			: --match will find all nested groups that object indirectly appears in (e.g. not just parent groups)
+	--ip <ip> [--match]			: lists IP and explicit matching objects. Also lists any address groups/tags the matched object is a member of
+						: --match will find implicit match in address groups and print containing cidr (e.g. within netmask)
+	--rule {object name|ip} [--match]	: lists rules with expanded fields for given object or explicit IP (will find objects hidden in groups)                       : --match if IP provided will find implicit match, e.g. if IP would match /24 object in rule
+	--debug			                : debug printing information
+	--dump [{--policy|--nats}]		: prints the database, expanded tags and rules
+					        : --policy prints expanded rules only
+						: --nats prints expanded nats only
 
 Examples:
 
