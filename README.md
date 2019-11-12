@@ -15,7 +15,7 @@ Options:
 
 	--list {types|type|all} 		: lists available object types, all object names of 'type x' or all objects
 	--used                                  : lists objects used in rules
-        --unused                                : lists objects not used in rules and prints output for panmanager to delete
+	--unused                                : lists objects not used in rules and prints output for panmanager to delete
 	--obj <name> [{--ipvf|--regex}]		: lists object contents exactly matching <name>
 						: --ipvf outputs ip/cidr format for address/address-group objects
 						: --regexp outputs object names matching pattern
@@ -36,7 +36,7 @@ Examples:
 	sudo panquery.pl --db panmanager-output-file.csv --list addr
 	sudo panquery.pl --db panmanager-output-file.csv --list all
 	sudo panquery.pl --db panmanager-output-file.csv --used
-        sudo panquery.pl --db panmanager-output-file.csv --unused
+	sudo panquery.pl --db panmanager-output-file.csv --unused
 	sudo panquery.pl --db panmanager-output-file.csv --obj <address>
 	sudo panquery.pl --db panmanager-output-file.csv --obj <address group>
 	sudo panquery.pl --db panmanager-output-file.csv --obj <address group> --ipvf
