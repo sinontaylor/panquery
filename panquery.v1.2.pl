@@ -3,7 +3,7 @@
 my $version = "1.2";
 # Date          04 July, 2017
 # Purpose       Palo Alto Firewall Query Tool to report on rule and object usage using offline configs
-# Revision      24 September, 2019
+# Revision      14 November, 2019
 #
 # 1.0 - released version
 # 1.1 - incorporated shared objects
