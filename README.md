@@ -1,7 +1,7 @@
 
 # Description
 
-panquery (v1.0) - Query tool for firewall databases created with panmanager
+panquery (v1.2) - Query tool for firewall databases created with panmanager
 
 Panquery is a CLI tool for Palo Alto database files created with panmanager. Panquery can list objects, find implicit/explicit policy matches, print expanded rules (eg groups + members) and show used/unused objects.
 
@@ -29,6 +29,7 @@ Options:
 	--dump [{--policy|--nats}]		: prints the database, expanded tags and rules
 					        : --policy prints expanded rules only
 						: --nats prints expanded nats only
+	--shared				: include data from shared database (e.g. Panorama).
 
 Examples:
 
@@ -74,4 +75,5 @@ Text::CSV_XS;
 
 # Caveats
 
-Does not suport IPv6 objects.
+- Does not suport IPv6 objects.
+- If you want to use the '--shared' option you will need to provide the script the location of the shared object file from Panorama as collected by panmanager. Suggest locating in a sub-diretory called 'databases'.
