@@ -17,9 +17,6 @@ use Getopt::Long;
 use Tie::IxHash; # for ordered hash for rules section as no rule uid exists in Palo Alto
 use Data::Validate::IP qw(is_ipv4 is_ipv6);
 use Net::IP::Match::Regexp qw(create_iprange_regexp_depthfirst match_ip);
-#use Net::Netmask;
-#use NetAddr::IP;
-#use Net::IPv4Addr qw (:all);
 use Text::CSV_XS;
 
 my $database;
@@ -42,15 +39,22 @@ my $rule;
 my $unused;
 my $used;
 my $shared;
+
+########################################################################################
+#
+# Edit items in this section to represent your data
+#
+########################################################################################
 my $baseDir = "/home/simon";
 my $scriptDir = $baseDir."/scripts";
 my $inputDir = $baseDir."/panmanager-output";
 my $staticDir = $baseDir."/common-data";
 my $dbDir = $baseDir."/panquery/databases";
+my $goFile = "PANORAMA_apidata-2019-10-29-16-35-41.csv";
+########################################################################################
 
 my $fh = new FileHandle;
 my $ofh = new FileHandle;
-my $goFile = "usdal1-03pac01-mgt.ip.mrshmc.com_apidata-2019-10-29-16-35-41.csv";
 my $appidfile = "PAN_application_8187-5632.csv";
 my @lists;
 my @networks;
@@ -1912,11 +1916,12 @@ sub usage {
         print "\t--debug						: debug printing information\n";
         print "\t--dump [{--policy|--nats}]			: prints the database while expanding tags and rules\n";
         print "							: --policy prints expanded rules only\n";
-        print "							: --nats prints expanded nats only\n\n";
+        print "							: --nats prints expanded nats only\n";
+	print "\t--shared					: includes Panorama shared object data\n\n";
 
         print "Examples:\n\n";
         print "\tsudo panquery.pl --db panmanager-output-file.csv --list types\n";
-        print "\tsudo panquery.pl --db panmanager-output-file.csv --list addr\n";
+        print "\tsudo panquery.pl --db panmanager-output-file.csv --list addr --shared\n";
         print "\tsudo panquery.pl --db panmanager-output-file.csv --list all\n";
         print "\tsudo panquery.pl --db panmanager-output-file.csv --used\n";
         print "\tsudo panquery.pl --db panmanager-output-file.csv --unused\n";
